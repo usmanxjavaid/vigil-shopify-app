@@ -24,10 +24,62 @@ const shopify = shopifyApp({
     : {}),
 });
 
+// Pushes the current shop + access token to the Python backend's `shops`
+// table. Fired on every authenticated admin request, not just at install —
+// the "keep the token warm" design from the TAD, so background work later
+// (webhooks, scheduled jobs) always has a recently-refreshed token.
+async function syncShopToBackend(session: {
+  shop: string;
+  accessToken?: string;
+  scope?: string;
+}) {
+  const backendUrl = process.env.PYTHON_BACKEND_URL;
+  const internalSecret = process.env.INTERNAL_API_SECRET;
+
+  if (!backendUrl || !internalSecret || !session.accessToken) {
+    console.error("Shop sync skipped: missing backend config or access token");
+    return;
+  }
+
+  try {
+    const response = await fetch(`${backendUrl}/internal/shops/sync`, {
+      method: "POST",
+      headers: {
+        "X-Internal-Secret": internalSecret,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        shop_domain: session.shop,
+        access_token: session.accessToken,
+        scope: session.scope ?? "",
+      }),
+    });
+
+    if (!response.ok) {
+      console.error(`Shop sync failed: ${response.status} ${await response.text()}`);
+    }
+  } catch (err) {
+    // Never let a sync failure break the merchant's actual page load —
+    // this is a side effect of authenticating, not the point of it.
+    console.error("Shop sync error:", err);
+  }
+}
+
+async function adminWithSync(
+  ...args: Parameters<typeof shopify.authenticate.admin>
+) {
+  const result = await shopify.authenticate.admin(...args);
+  await syncShopToBackend(result.session);
+  return result;
+}
+
 export default shopify;
 export const apiVersion = ApiVersion.July26;
 export const addDocumentResponseHeaders = shopify.addDocumentResponseHeaders;
-export const authenticate = shopify.authenticate;
+export const authenticate = {
+  ...shopify.authenticate,
+  admin: adminWithSync,
+};
 export const unauthenticated = shopify.unauthenticated;
 export const login = shopify.login;
 export const registerWebhooks = shopify.registerWebhooks;
